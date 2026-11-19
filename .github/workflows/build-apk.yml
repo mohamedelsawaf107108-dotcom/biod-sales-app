@@ -45,50 +45,77 @@ jobs:
           import zipfile
           from pathlib import Path
 
-          archive_path = Path("BIO-D-Android.zip")
-          if not archive_path.is_file():
-              raise FileNotFoundError(
-                  "Upload BIO-D-Android.zip to the repository root"
-              )
+          source = Path("BIO-D-Android.zip")
+          if not source.is_file():
+              raise FileNotFoundError("Upload BIO-D-Android.zip first")
 
           root = Path("android").resolve()
           root.mkdir(parents=True, exist_ok=True)
 
-          with zipfile.ZipFile(archive_path) as archive:
+          with zipfile.ZipFile(source) as archive:
               for item in archive.infolist():
                   target = (root / item.filename).resolve()
                   if not target.is_relative_to(root):
                       raise ValueError("Invalid archive path")
-
               archive.extractall(root)
 
-          required_files = [
-              "settings.gradle",
-              "app/build.gradle",
-              "app/src/main/AndroidManifest.xml",
-              "app/src/main/assets/www/index.html",
-              "app/src/main/assets/www/app.js",
-          ]
+          if not (root / "app/build.gradle").is_file():
+              raise FileNotFoundError("Android project is missing")
+          PY
 
-          for name in required_files:
-              if not (root / name).is_file():
-                  raise FileNotFoundError(name)
+      - name: Prepare permanent signing key
+        env:
+          SIGNING_SECRET: ${{ secrets.BIO_D_SIGNING }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import json
+          import base64
+          from pathlib import Path
 
-          print("Android project extracted successfully")
+          raw = os.environ.get("SIGNING_SECRET", "")
+          if not raw:
+              raise RuntimeError("Add BIO_D_SIGNING in GitHub Secrets first")
+
+          data = json.loads(raw)
+          password = data["password"]
+          if "\n" in password or "\r" in password:
+              raise ValueError("Invalid password format")
+          if data["alias"] != "biod":
+              raise ValueError("Unexpected signing alias")
+
+          key = Path(os.environ["RUNNER_TEMP"]) / "biod-signing.p12"
+          key.write_bytes(base64.b64decode(data["keystore"], validate=True))
+          key.chmod(0o600)
+
+          print(f"::add-mask::{password}")
+
+          version = 1000 + int(os.environ["GITHUB_RUN_NUMBER"])
+
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"BIO_D_KEYSTORE={key}\n")
+              output.write(f"BIO_D_KEY_PASSWORD={password}\n")
+              output.write(f"BIO_D_VERSION_CODE={version}\n")
           PY
 
       - name: Install Android packages
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
-      - name: Build APK
+      - name: Build signed APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      - name: Verify APK signature
+        run: |
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
+            --verbose \
+            android/app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare download
         run: |
           mkdir -p apk
-          cp android/app/build/outputs/apk/debug/app-debug.apk \
+          cp android/app/build/outputs/apk/release/app-release.apk \
             apk/BIO-D-Sales.apk
 
       - name: Upload APK
@@ -97,3 +124,7 @@ jobs:
           name: BIO-D-Sales-APK
           path: apk/BIO-D-Sales.apk
           if-no-files-found: error
+
+      - name: Remove temporary signing key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/biod-signing.p12"
