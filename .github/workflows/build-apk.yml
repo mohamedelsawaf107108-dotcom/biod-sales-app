@@ -11,12 +11,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
-    env:
-      BIO_D_VERSION_CODE: ${{ 2000 + github.run_number }}
-
     steps:
       - name: Download repository
         uses: actions/checkout@v4
+
+      - name: Set version number
+        shell: bash
+        run: |
+          VERSION_CODE=$((20000 + GITHUB_RUN_NUMBER))
+          echo "BIO_D_VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -83,20 +86,27 @@ jobs:
               keystore = base64.b64decode(
                   config["keystore"], validate=True
               )
+
               if config.get("alias", "biod") != "biod":
                   raise ValueError("Unexpected key alias")
+
               if not isinstance(password, str) or not password:
                   raise ValueError("Missing password")
+
               if "\n" in password or "\r" in password:
                   raise ValueError("Unsupported password format")
+
               if not keystore:
                   raise ValueError("Empty keystore")
+
           except Exception:
               raise RuntimeError(
                   "BIO_D_SIGNING is invalid. Use the original signing secret."
               ) from None
 
-          key_path = Path(os.environ["RUNNER_TEMP"]) / "biod-signing.p12"
+          key_path = (
+              Path(os.environ["RUNNER_TEMP"]) / "biod-signing.p12"
+          )
           key_path.write_bytes(keystore)
           key_path.chmod(0o600)
 
