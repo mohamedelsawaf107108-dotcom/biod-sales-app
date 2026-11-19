@@ -3,6 +3,7 @@ name: Build BIO-D APK
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     paths:
       - BIO-D-Android.zip
       - .github/workflows/build-apk.yml
@@ -15,40 +16,61 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Download repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Set up Java
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - uses: android-actions/setup-android@v3
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platform-tools"
 
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
-      - name: Extract project
+      - name: Extract Android project
         run: |
           python3 - <<'PY'
           import zipfile
           from pathlib import Path
 
+          archive_path = Path("BIO-D-Android.zip")
+          if not archive_path.is_file():
+              raise FileNotFoundError(
+                  "Upload BIO-D-Android.zip to the repository root first"
+              )
+
           root = Path("android").resolve()
-          with zipfile.ZipFile("BIO-D-Android.zip") as archive:
+          root.mkdir(parents=True, exist_ok=True)
+
+          with zipfile.ZipFile(archive_path) as archive:
               for item in archive.infolist():
                   target = (root / item.filename).resolve()
                   if not target.is_relative_to(root):
                       raise ValueError("Invalid archive path")
+
               archive.extractall(root)
+
+          if not (root / "settings.gradle").is_file():
+              raise FileNotFoundError("Android project files are missing")
+
+          print("Android project extracted successfully")
           PY
 
-      - name: Install Android SDK
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Install required Android packages
+        run: |
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
 
       - name: Build APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
