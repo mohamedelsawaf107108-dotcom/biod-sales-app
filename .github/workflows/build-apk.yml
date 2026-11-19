@@ -2,22 +2,17 @@ name: Build BIO-D APK
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - BIO-D-Android.zip
-      - .github/workflows/build-apk.yml
 
 permissions:
   contents: read
 
-concurrency:
-  group: bio-d-apk
-  cancel-in-progress: true
-
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    env:
+      BIO_D_VERSION_CODE: ${{ 2000 + github.run_number }}
 
     steps:
       - name: Download repository
@@ -29,131 +24,168 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: "platform-tools"
-
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.9"
 
       - name: Extract Android project
+        shell: bash
         run: |
           python3 - <<'PY'
-          import zipfile
           from pathlib import Path
+          import zipfile
 
-          source = Path("BIO-D-Android.zip")
-          if not source.is_file():
-              raise FileNotFoundError(
-                  "Upload BIO-D-Android.zip to the repository root"
+          archive = Path("BIO-D-Android.zip")
+          destination = Path("android-project").resolve()
+
+          if not archive.is_file():
+              raise RuntimeError(
+                  "Upload BIO-D-Android.zip to the repository first."
               )
 
-          root = Path("android").resolve()
-          root.mkdir(parents=True, exist_ok=True)
+          destination.mkdir(exist_ok=True)
 
-          with zipfile.ZipFile(source) as archive:
-              for item in archive.infolist():
-                  target = (root / item.filename).resolve()
-                  if not target.is_relative_to(root):
-                      raise ValueError("Invalid archive path")
+          with zipfile.ZipFile(archive) as package:
+              for item in package.infolist():
+                  target = (destination / item.filename).resolve()
+                  if not target.is_relative_to(destination):
+                      raise RuntimeError("Invalid archive path")
+              package.extractall(destination)
 
-              archive.extractall(root)
-
-          required_files = [
-              "settings.gradle",
-              "app/build.gradle",
-              "app/src/main/AndroidManifest.xml",
-              "app/src/main/assets/www/index.html",
-              "app/src/main/assets/www/app.js",
-              "app/src/main/assets/www/identity.js",
-              "app/src/main/assets/www/accounts.json",
-          ]
-
-          for name in required_files:
-              if not (root / name).is_file():
-                  raise FileNotFoundError(
-                      f"Missing {name}. Upload the latest BIO-D-Android.zip"
-                  )
-
-          print("Android project extracted successfully")
+          if not (destination / "app" / "build.gradle").is_file():
+              raise RuntimeError(
+                  "Use BIO-D-Android.zip from the latest update."
+              )
           PY
 
       - name: Prepare permanent signing key
+        shell: bash
         env:
-          SIGNING_SECRET: ${{ secrets.BIO_D_SIGNING }}
+          BIO_D_SIGNING: ${{ secrets.BIO_D_SIGNING }}
         run: |
           python3 - <<'PY'
-          import os
-          import json
           import base64
+          import json
+          import os
           from pathlib import Path
 
-          raw = os.environ.get("SIGNING_SECRET", "")
+          raw = os.environ.get("BIO_D_SIGNING", "").strip()
+
           if not raw:
               raise RuntimeError(
-                  "Add BIO_D_SIGNING in GitHub Secrets first"
+                  "Add BIO_D_SIGNING to repository Actions secrets first."
               )
 
-          data = json.loads(raw)
-          password = data["password"]
+          try:
+              config = json.loads(raw)
+              password = config["password"]
+              keystore = base64.b64decode(
+                  config["keystore"], validate=True
+              )
+              if config.get("alias", "biod") != "biod":
+                  raise ValueError("Unexpected key alias")
+              if not isinstance(password, str) or not password:
+                  raise ValueError("Missing password")
+              if "\n" in password or "\r" in password:
+                  raise ValueError("Unsupported password format")
+              if not keystore:
+                  raise ValueError("Empty keystore")
+          except Exception:
+              raise RuntimeError(
+                  "BIO_D_SIGNING is invalid. Use the original signing secret."
+              ) from None
 
-          if "\n" in password or "\r" in password:
-              raise ValueError("Invalid password format")
+          key_path = Path(os.environ["RUNNER_TEMP"]) / "biod-signing.p12"
+          key_path.write_bytes(keystore)
+          key_path.chmod(0o600)
 
-          if data["alias"] != "biod":
-              raise ValueError("Unexpected signing alias")
-
-          key = Path(os.environ["RUNNER_TEMP"]) / "biod-signing.p12"
-          key.write_bytes(
-              base64.b64decode(data["keystore"], validate=True)
+          escaped = (
+              password.replace("%", "%25")
+              .replace("\r", "%0D")
+              .replace("\n", "%0A")
           )
-          key.chmod(0o600)
-
-          print(f"::add-mask::{password}")
-
-          version = 1000 + int(os.environ["GITHUB_RUN_NUMBER"])
+          print("::add-mask::" + escaped)
 
           with open(os.environ["GITHUB_ENV"], "a") as output:
-              output.write(f"BIO_D_KEYSTORE={key}\n")
+              output.write(f"BIO_D_KEYSTORE={key_path}\n")
               output.write(f"BIO_D_KEY_PASSWORD={password}\n")
-              output.write(f"BIO_D_VERSION_CODE={version}\n")
           PY
 
-      - name: Install Android packages
+      - name: Install Android SDK packages
+        shell: bash
         run: |
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
-      - name: Check JavaScript syntax
-        run: |
-          node --check android/app/src/main/assets/www/app.js
-          node --check android/app/src/main/assets/www/identity.js
+          if [ -z "$SDK_ROOT" ]; then
+            echo "Android SDK was not found."
+            exit 1
+          fi
+
+          SDK_MANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDK_MANAGER" ]; then
+            SDK_MANAGER="$(command -v sdkmanager || true)"
+          fi
+
+          if [ -z "$SDK_MANAGER" ]; then
+            echo "sdkmanager was not found."
+            exit 1
+          fi
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+
+          set +o pipefail
+          yes | "$SDK_MANAGER" --licenses > /dev/null
+          LICENSE_RESULT=${PIPESTATUS[1]}
+          set -o pipefail
+
+          if [ "$LICENSE_RESULT" -ne 0 ]; then
+            echo "Android SDK license setup failed."
+            exit "$LICENSE_RESULT"
+          fi
+
+          "$SDK_MANAGER" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "platform-tools"
 
       - name: Build signed APK
-        working-directory: android
-        run: gradle assembleRelease --no-daemon --stacktrace
+        working-directory: android-project
+        shell: bash
+        run: |
+          gradle \
+            --no-daemon \
+            --console=plain \
+            :app:assembleRelease
 
       - name: Verify APK signature
+        shell: bash
         run: |
           "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify \
             --verbose \
-            android/app/build/outputs/apk/release/app-release.apk
+            --print-certs \
+            android-project/app/build/outputs/apk/release/app-release.apk
 
       - name: Prepare download
+        shell: bash
         run: |
-          mkdir -p apk
-          cp android/app/build/outputs/apk/release/app-release.apk \
-            apk/BIO-D-Sales.apk
+          mkdir -p download
+
+          cp \
+            android-project/app/build/outputs/apk/release/app-release.apk \
+            download/BIO-D-Sales.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: BIO-D-Sales-APK
-          path: apk/BIO-D-Sales.apk
+          path: download/BIO-D-Sales.apk
           if-no-files-found: error
+          retention-days: 30
 
       - name: Remove temporary signing key
         if: always()
-        run: rm -f "$RUNNER_TEMP/biod-signing.p12"
+        shell: bash
+        run: |
+          rm -f "$RUNNER_TEMP/biod-signing.p12"
