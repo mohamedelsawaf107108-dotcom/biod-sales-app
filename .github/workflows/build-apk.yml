@@ -47,7 +47,9 @@ jobs:
 
           source = Path("BIO-D-Android.zip")
           if not source.is_file():
-              raise FileNotFoundError("Upload BIO-D-Android.zip first")
+              raise FileNotFoundError(
+                  "Upload BIO-D-Android.zip to the repository root"
+              )
 
           root = Path("android").resolve()
           root.mkdir(parents=True, exist_ok=True)
@@ -57,10 +59,26 @@ jobs:
                   target = (root / item.filename).resolve()
                   if not target.is_relative_to(root):
                       raise ValueError("Invalid archive path")
+
               archive.extractall(root)
 
-          if not (root / "app/build.gradle").is_file():
-              raise FileNotFoundError("Android project is missing")
+          required_files = [
+              "settings.gradle",
+              "app/build.gradle",
+              "app/src/main/AndroidManifest.xml",
+              "app/src/main/assets/www/index.html",
+              "app/src/main/assets/www/app.js",
+              "app/src/main/assets/www/identity.js",
+              "app/src/main/assets/www/accounts.json",
+          ]
+
+          for name in required_files:
+              if not (root / name).is_file():
+                  raise FileNotFoundError(
+                      f"Missing {name}. Upload the latest BIO-D-Android.zip"
+                  )
+
+          print("Android project extracted successfully")
           PY
 
       - name: Prepare permanent signing key
@@ -75,17 +93,23 @@ jobs:
 
           raw = os.environ.get("SIGNING_SECRET", "")
           if not raw:
-              raise RuntimeError("Add BIO_D_SIGNING in GitHub Secrets first")
+              raise RuntimeError(
+                  "Add BIO_D_SIGNING in GitHub Secrets first"
+              )
 
           data = json.loads(raw)
           password = data["password"]
+
           if "\n" in password or "\r" in password:
               raise ValueError("Invalid password format")
+
           if data["alias"] != "biod":
               raise ValueError("Unexpected signing alias")
 
           key = Path(os.environ["RUNNER_TEMP"]) / "biod-signing.p12"
-          key.write_bytes(base64.b64decode(data["keystore"], validate=True))
+          key.write_bytes(
+              base64.b64decode(data["keystore"], validate=True)
+          )
           key.chmod(0o600)
 
           print(f"::add-mask::{password}")
@@ -101,6 +125,11 @@ jobs:
       - name: Install Android packages
         run: |
           sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check android/app/src/main/assets/www/app.js
+          node --check android/app/src/main/assets/www/identity.js
 
       - name: Build signed APK
         working-directory: android
